@@ -77,7 +77,9 @@ def verdict(conf: int, brad: float, hard: int, soft: int,
 
 # ── render ─────────────────────────────────────────────────────────────
 
-def render(date_str: str, exchange: str):
+def render(date_str: str, exchange: str,
+           morning_open: float = None, morning_high: float = None,
+           morning_low: float = None, current_price: float = None):
     global _date_str
     _date_str = date_str
 
@@ -210,6 +212,25 @@ def render(date_str: str, exchange: str):
         print(f"╠{HR}╣")
         print(f"║  STELLIUM VOLATILITY: {st_vol['volatility_multiplier']}×  →  pos. size {st_vol['suggested_position_fraction']:.0%},  stop {st_vol['suggested_stop_multiplier']:.1f}×      ║")
 
+    # ── golden fib envelope ───────────────────────────────────────
+    if morning_open and morning_high and morning_low:
+        from astroquant.fibrisk import envelope_from_morning, render_envelope
+        from astroquant.confluence import compute_confluence, render_confluence
+
+        env = envelope_from_morning(morning_open, morning_high, morning_low)
+        print(f"╠{HR}╣")
+        fib_text = render_envelope(env, current_price)
+        for line in fib_text.split("\n"):
+            print(f"║  {line:<{W-4}}║")
+
+        if current_price:
+            conf_result = compute_confluence(date_str, env, current_price)
+            if conf_result:
+                print(f"╠{HR}╣")
+                conf_text = render_confluence(conf_result)
+                for line in conf_text.split("\n"):
+                    print(f"║  {line:<{W-4}}║")
+
     # ── intraday ────────────────────────────────────────────────────
     from astroquant.intraday import trading_crossings
     crossings, dc = trading_crossings(jd, exchange, step_minutes=15)
@@ -243,8 +264,12 @@ def main():
     p.add_argument("date", help="YYYY-MM-DD")
     p.add_argument("--exchange", "-e", default="CHICAGO",
                    choices=["CHICAGO", "NYC", "LONDON", "TOKYO"])
+    p.add_argument("--open", type=float, default=None, help="Morning open price (for fib envelope)")
+    p.add_argument("--high", type=float, default=None, help="Morning high price")
+    p.add_argument("--low", type=float, default=None, help="Morning low price")
+    p.add_argument("--price", type=float, default=None, help="Current price (for fib positioning)")
     args = p.parse_args()
-    render(args.date, args.exchange)
+    render(args.date, args.exchange, args.open, args.high, args.low, args.price)
 
 
 if __name__ == "__main__":
