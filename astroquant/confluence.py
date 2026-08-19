@@ -17,6 +17,46 @@ from .midpoints import all_key_midpoint_hits, uranus_saturn_pluto
 from .fibrisk import FibEnvelope
 
 
+# ── Recalibrated weights (SPY, 2018-2022, 5d forward return) ─────────
+# Empirically fit via Ridge regression on 406 extreme events.
+# Old weights were fixed ±1/±2/±3 from Hitt's qualitative importance.
+# New weights are actual coefficients predicting 5-day return.
+#
+# Positive weight → fade the extreme (buy reversal)
+# Negative weight → extreme may continue (don't fade)
+#
+# R² = 0.047 (modest), but quintile monotonicity is clean:
+#   worst quintile: -0.33%  →  best quintile: +0.99%
+
+RECALIBRATED_WEIGHTS = {
+    "grand_cross":       +0.00995,
+    "moon_phase_full":   -0.00694,
+    "t_square":          -0.00606,
+    "is_upper_extreme":  -0.00590,
+    "min_aspect_orb":    -0.00480,
+    "grand_trine":       +0.00420,
+    "yod":               +0.00341,
+    "hard_tight_count":  +0.00339,
+    "moon_phase_new":    +0.00316,
+    "dist_into_extreme": -0.00126,
+    "jupiter_rx":        -0.00119,
+    "midpoint_count":    +0.00101,
+    "moon_saturn_closeness": +0.00097,
+    "soft_total":        +0.00082,
+    "saturn_rx":         +0.00055,
+    "merc_rx":           +0.00031,
+    "usp_hit":           -0.00005,
+    "hard_total":        -0.00002,
+}
+
+from .ephemeris import (
+    PLANETS, get_longitudes, get_moon_phase, get_speeds, jd_from_date,
+)
+from .aspects import find_all_aspects, detect_all_complex_patterns
+from .midpoints import all_key_midpoint_hits, uranus_saturn_pluto
+from .fibrisk import FibEnvelope
+
+
 # ── confluence rules ───────────────────────────────────────────────────
 
 def score_reversal_at_extreme(
@@ -162,6 +202,123 @@ def compute_confluence(
     )
 
     return result
+
+
+def score_reversal_calibrated(
+    extreme: str,
+    top_aspects: List[Dict[str, Any]],
+    complex_patterns: Dict[str, Any],
+    midpoint_hits: List[Dict[str, Any]],
+    usp_hit: bool,
+    merc_rx: bool,
+    saturn_rx: bool,
+    jupiter_rx: bool,
+    moon_phase_label: str,
+    is_upper: bool,
+    dist_into_extreme_pct: float = 0.0,
+) -> Dict[str, Any]:
+    """Score using recalibrated weights from Ridge regression.
+
+    Returns {score_1_to_5, expected_return, reasons, action}.
+    The 'score' is a quintile (0-4) of the predicted return.
+    """
+    w = RECALIBRATED_WEIGHTS
+
+    # Compute feature values (same as recalibration input)
+    moon_saturn_orb = 10.0
+    for a in top_aspects:
+        if {a["p1"], a["p2"]} == {"Moon", "Saturn"} and a["type"] in ("square", "opposition"):
+            moon_saturn_orb = min(moon_saturn_orb, a["orb"])
+
+    hard_tight = sum(1 for a in top_aspects if a["type"] in ("square", "opposition") and a["orb"] <= 2.0)
+    soft = sum(1 for a in top_aspects if a["type"] in ("sextile", "trine"))
+    hard = sum(1 for a in top_aspects if a["type"] in ("square", "opposition"))
+    min_orb = min((a["orb"] for a in top_aspects), default=10.0)
+
+    # Compute predicted return
+    pred = 0.0
+    pred += w.get("moon_saturn_closeness", 0) * max(0, 5.0 - moon_saturn_orb)
+    pred += w.get("hard_tight_count", 0) * hard_tight
+    pred += w.get("hard_total", 0) * hard
+    pred += w.get("soft_total", 0) * soft
+    pred += w.get("min_aspect_orb", 0) * min_orb
+    pred += w.get("merc_rx", 0) * (1.0 if merc_rx else 0.0)
+    pred += w.get("saturn_rx", 0) * (1.0 if saturn_rx else 0.0)
+    pred += w.get("jupiter_rx", 0) * (1.0 if jupiter_rx else 0.0)
+    pred += w.get("t_square", 0) * (1.0 if complex_patterns.get("t_square") else 0.0)
+    pred += w.get("grand_cross", 0) * (1.0 if complex_patterns.get("grand_cross") else 0.0)
+    pred += w.get("yod", 0) * (1.0 if complex_patterns.get("yod") else 0.0)
+    pred += w.get("grand_trine", 0) * (1.0 if complex_patterns.get("grand_trine") else 0.0)
+    pred += w.get("usp_hit", 0) * (1.0 if usp_hit else 0.0)
+    pred += w.get("midpoint_count", 0) * len(midpoint_hits)
+    pred += w.get("moon_phase_full", 0) * (1.0 if moon_phase_label == "FULL" else 0.0)
+    pred += w.get("moon_phase_new", 0) * (1.0 if moon_phase_label == "NEW" else 0.0)
+    pred += w.get("is_upper_extreme", 0) * (1.0 if is_upper else 0.0)
+    pred += w.get("dist_into_extreme", 0) * dist_into_extreme_pct
+
+    # Map to quintile based on the calibration bins
+    # Bin boundaries from training: [-0.0033, +0.0003, +0.0052, +0.0099, +0.0099]
+    if pred < -0.0015:
+        score = 1
+    elif pred < 0.0003:
+        score = 2
+    elif pred < 0.0052:
+        score = 3
+    elif pred < 0.0090:
+        score = 4
+    else:
+        score = 5
+
+    reasons = []
+    # Contributing factors (positive drivers)
+    drivers = []
+    if complex_patterns.get("grand_cross"):
+        drivers.append("Grand Cross (strongest positive)")
+    if complex_patterns.get("grand_trine"):
+        drivers.append("Grand Trine (continuation)")
+    if hard_tight >= 2:
+        drivers.append(f"{hard_tight} hard aspects at tight orb")
+    if moon_phase_label == "NEW":
+        drivers.append("New Moon (fresh start)")
+    if moon_saturn_orb < 2.0:
+        drivers.append(f"Moon-Saturn close (orb {moon_saturn_orb:.1f}°)")
+
+    # Negative drivers
+    neg_drivers = []
+    if is_upper:
+        neg_drivers.append("Upper extreme (historical edge is fade-lower, not fade-upper)")
+    if moon_phase_label == "FULL":
+        neg_drivers.append("Full Moon (momentum continues)")
+    if complex_patterns.get("t_square"):
+        neg_drivers.append("T-Square (stress extends)")
+    if min_orb < 1.0:
+        neg_drivers.append(f"Exact aspect at {min_orb:.1f}° (trend extends)")
+
+    reasons = [f"+: {d}" for d in drivers] + [f"-: {d}" for d in neg_drivers]
+    if not reasons:
+        reasons = ["No strong directional signals"]
+
+    if score >= 4:
+        action = "FADE" if is_upper else "BUY"
+        confidence = "HIGH — calibrated model predicts strong reversal"
+    elif score >= 3:
+        action = "FADE" if is_upper else "BUY"
+        confidence = "MODERATE — calibrated model predicts mild reversal"
+    elif score >= 2:
+        action = "WAIT"
+        confidence = "LOW — calibrated model predicts near-flat return"
+    else:
+        action = "NO_TRADE" if is_upper else "WAIT"
+        confidence = "NEGATIVE — calibrated model predicts extension, not reversal"
+
+    return {
+        "extreme": extreme,
+        "score": score,
+        "predicted_return": round(pred, 6),
+        "confidence": confidence,
+        "action": action,
+        "reasons": reasons,
+    }
 
 
 def render_confluence(conf: Optional[Dict[str, Any]]) -> str:

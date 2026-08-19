@@ -215,7 +215,10 @@ def render(date_str: str, exchange: str,
     # ── golden fib envelope ───────────────────────────────────────
     if morning_open and morning_high and morning_low:
         from astroquant.fibrisk import envelope_from_morning, render_envelope
-        from astroquant.confluence import compute_confluence, render_confluence
+        from astroquant.confluence import (
+            compute_confluence, render_confluence,
+            score_reversal_calibrated,
+        )
 
         env = envelope_from_morning(morning_open, morning_high, morning_low)
         print(f"╠{HR}╣")
@@ -224,12 +227,29 @@ def render(date_str: str, exchange: str,
             print(f"║  {line:<{W-4}}║")
 
         if current_price:
-            conf_result = compute_confluence(date_str, env, current_price)
-            if conf_result:
+            extreme = env.is_at_extreme(current_price, pct=15.0)
+            if extreme:
+                # Recompute with calibrated scorer
+                extreme_name, _, dist_pct = env.nearest_level(current_price)
+                cal = score_reversal_calibrated(
+                    extreme=extreme_name,
+                    top_aspects=sorted(aspects, key=lambda a: a["orb"])[:6],
+                    complex_patterns=cp,
+                    midpoint_hits=hits,
+                    usp_hit=usp is not None,
+                    merc_rx=spd.get("Mercury", 0) < 0,
+                    saturn_rx=spd.get("Saturn", 0) < 0,
+                    jupiter_rx=spd.get("Jupiter", 0) < 0,
+                    moon_phase_label="FULL" if 165 <= elong <= 195 else "NEW" if elong <= 15 or elong >= 345 else "",
+                    is_upper=extreme_name.startswith("+"),
+                    dist_into_extreme_pct=dist_pct,
+                )
+                stars = "★" * cal["score"] + "☆" * (5 - cal["score"])
                 print(f"╠{HR}╣")
-                conf_text = render_confluence(conf_result)
-                for line in conf_text.split("\n"):
-                    print(f"║  {line:<{W-4}}║")
+                print(f"║  FIB EXTREME: {extreme_name}  |  CALIBRATED CONFLUENCE: {stars} ({cal['confidence']})║")
+                print(f"║  Action: {cal['action']}  |  Predicted 5d return: {cal['predicted_return']:+.2%} ║")
+                for r in cal["reasons"]:
+                    print(f"║    {r:<{W-6}}║")
 
     # ── intraday ────────────────────────────────────────────────────
     from astroquant.intraday import trading_crossings
