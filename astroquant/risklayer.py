@@ -73,12 +73,11 @@ def tier1_tilts(
     size = 1.0
     tilts: List[str] = []
 
-    # ── Fib extreme + calibrated confluence (strongest signal) ──
+    # ── Fib extreme + calibrated confluence ──
     if fib_signal:
         score = fib_signal.get("score", 0)
         extreme = fib_signal.get("extreme", "")
         if extreme == "-1.372" and score >= 4:
-            # Fade-lower with strong confluence: IS 68%, OOS 64%
             size *= 1.30
             tilts.append(f"🥇 FIB LOWER STRONG ({score}/5): buy dip, size ×1.30 "
                          f"(backtest: 64% OOS hit rate)")
@@ -86,10 +85,12 @@ def tier1_tilts(
             size *= 1.15
             tilts.append(f"🥈 FIB LOWER MODERATE ({score}/5): buy dip, size ×1.15")
         elif extreme == "+1.372":
-            # Upper extreme: negative edge in backtest
-            size *= 0.75
-            tilts.append(f"⚠️ FIB UPPER ({score}/5): reduce size to ×0.75 "
-                         f"(backtest: upper fade has negative edge)")
+            # Upper extreme: backtest shows fade LOSES money.
+            # Position: stay long (market drifts up) but don't ADD.
+            # Do NOT reduce — the market keeps grinding.
+            size *= 1.0  # no change
+            tilts.append(f"📈 FIB UPPER ({score}/5): stay in trend, don't add "
+                         f"(backtest: upper fade = negative edge. Market drifts up)")
 
     # ── Moon-Saturn exact (Hitt: "no new exposure") ──
     aspects = find_all_aspects(pos)
