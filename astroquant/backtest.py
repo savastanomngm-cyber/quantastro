@@ -306,3 +306,112 @@ def z_score_analysis(
             else "weak or no monotonic pattern"
         ),
     }
+
+
+def fetch_and_analyze(
+    start: str,
+    end: str,
+    ticker: str = "SPY",
+    include_zscore: bool = True,
+) -> Dict[str, Any]:
+    """Fetch market data via yfinance and run the full backtest pipeline.
+
+    Args:
+        start, end: "YYYY-MM-DD" date range
+        ticker: yfinance symbol (SPY, QQQ, GLD, etc.)
+        include_zscore: also run Bradley z-score binning
+
+    Returns:
+        dict with keys: signal_df, price_df, analysis, (optionally) zscore,
+        and a text summary under 'summary'.
+    """
+    import pandas as pd
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return {"error": "yfinance not installed — pip install yfinance"}
+
+    # ── Fetch price data ──
+    data = yf.download(ticker, start=start, end=end, progress=False)
+    if data.empty:
+        return {"error": f"no data for {ticker} {start}→{end}"}
+
+    close = data["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    log_ret = np.log(close / close.shift(1)).dropna()
+
+    # ── Generate signals ──
+    signal_rows = generate_signal_df(start, end)
+    signal_df = pd.DataFrame(signal_rows)
+    signal_df["date"] = pd.to_datetime(signal_df["date"])
+
+    price_df = pd.DataFrame({"log_return": log_ret})
+    price_df.index = pd.to_datetime(price_df.index)
+
+    # ── Analyze ──
+    analysis = analyze_signal(signal_df, price_df, return_col="log_return")
+
+    result: Dict[str, Any] = {
+        "ticker": ticker,
+        "date_range": f"{start} → {end}",
+        "n_days": len(price_df),
+        "signal_df": signal_df,
+        "analysis": analysis,
+    }
+
+    if include_zscore:
+        merged = signal_df.merge(
+            price_df, left_on="date", right_index=True, how="inner"
+        )
+        if len(merged) >= 30:
+            zs = z_score_analysis(
+                merged["bradley_total"], merged["log_return"]
+            )
+            result["zscore"] = zs
+
+    # ── Text summary ──
+    lines = [f"## AstroQuant Backtest: {ticker} ({start} → {end})", ""]
+    lines.append(f"**Trading days:** {result['n_days']}")
+    lines.append("")
+
+    # Top correlations
+    corrs = analysis.get("correlations", {})
+    if corrs:
+        sorted_corrs = sorted(corrs.items(), key=lambda x: abs(x[1]), reverse=True)
+        lines.append("### Signal → Return Correlations")
+        lines.append("| Signal | Correlation |")
+        lines.append("|--------|-------------|")
+        for name, val in sorted_corrs[:10]:
+            lines.append(f"| {name} | {val:+.4f} |")
+        lines.append("")
+
+    # Conditional means for binary flags
+    cond = analysis.get("conditional_means", {})
+    if cond:
+        lines.append("### Conditional Return Analysis")
+        lines.append("| Signal | Active Mean | Inactive Mean | Δ | t-stat | n |")
+        lines.append("|--------|-------------|---------------|---|-------|---|")
+        for name, stats in sorted(cond.items(), key=lambda x: abs(x[1].get("t_stat", 0)), reverse=True):
+            am = stats.get("when_active", 0)
+            im = stats.get("when_inactive", 0)
+            diff = am - im
+            t = stats.get("t_stat", 0)
+            n = stats.get("hits", 0)
+            lines.append(f"| {name} | {am:+.5f} | {im:+.5f} | {diff:+.5f} | {t:+.2f} | {n} |")
+        lines.append("")
+
+    # Z-score summary
+    if "zscore" in result and "bins" in result["zscore"]:
+        zs = result["zscore"]
+        lines.append("### Bradley Index Decile Analysis")
+        lines.append(f"**Monotonicity score:** {zs.get('monotonicity_score', 0):+.4f}  ({zs.get('interpretation', '')})")
+        lines.append("| Decile | Mean Return | Std | Days |")
+        lines.append("|--------|-------------|-----|------|")
+        for b in zs["bins"][:10]:
+            lines.append(f"| {b['bin']} | {b['mean_return']:+.5f} | {b['std']:.5f} | {b['count']} |")
+        lines.append("")
+
+    result["summary"] = "\n".join(lines)
+    return result
