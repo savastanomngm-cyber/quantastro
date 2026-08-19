@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Print all astro signals for a single date as a clean table.
+"""Single-day signal card — deep research edition.
+
+Sources: Hitt *AstroEcon* (1997-2000), Weingarten *Investing by the Stars* (2000).
 
 Usage:
   python3 run_signals.py 2026-08-19
@@ -13,54 +15,82 @@ from astroquant.ephemeris import (
     PLANETS, get_longitudes, get_moon_phase, get_sign, get_speeds, jd_from_date,
 )
 from astroquant.aspects import find_all_aspects, detect_all_complex_patterns
-from astroquant.bradley import bradley_index, BRADLEY_WEIGHTS
+from astroquant.bradley import bradley_index
 from astroquant.midpoints import all_key_midpoint_hits, uranus_saturn_pluto
 from astroquant.optimize import compute_confluence_score, stellium_volatility_signal
+from astroquant.knowledge import (
+    COMPLEX_PATTERN_RULES,
+    PLANET_MEANINGS,
+    PLANET_MARKET_SIGNATURE,
+    PLANET_PAIR_KEYWORDS,
+    MOON_SIGN_ASSET_BIAS,
+    ANGLE_CROSSING_SIGNIFICANCE,
+    HISTORICAL_DATES,
+    planet_pair_meaning,
+)
 
-SEP = "─" * 78
-
-
-def _phase_label(elongation: float) -> str:
-    if elongation <= 15 or elongation >= 345:
-        return "🌑 NEW MOON"
-    elif 165 <= elongation <= 195:
-        return "🌕 FULL MOON"
-    elif 90 <= elongation <= 105:
-        return "🌓 FIRST QUARTER"
-    elif 255 <= elongation <= 270:
-        return "🌗 LAST QUARTER"
-    elif elongation < 90:
-        return "🌒 WAXING CRESCENT"
-    elif elongation < 165:
-        return "🌔 WAXING GIBBOUS"
-    elif elongation < 255:
-        return "🌖 WANING GIBBOUS"
-    else:
-        return "🌘 WANING CRESCENT"
+W = 64
+HR = "─" * W
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="AstroQuant — single-date signal dump"
-    )
-    parser.add_argument("date", help="Date in YYYY-MM-DD format")
-    parser.add_argument("--exchange", "-e", default="CHICAGO",
-                        choices=["CHICAGO", "NYC", "LONDON", "TOKYO"],
-                        help="Exchange for intraday crossings (default: CHICAGO)")
-    args = parser.parse_args()
+# ── verdict ────────────────────────────────────────────────────────────
+
+def verdict(conf: int, brad: float, hard: int, soft: int,
+            stellium: bool, gc: bool, usp_hit: bool, t_sq: bool, yod: bool) -> tuple:
+    """Return (emoji, label, extra_note)."""
+
+    # Historical date match
+    for hist_date, info in HISTORICAL_DATES.items():
+        if _date_str == hist_date:
+            return ("⚠️", f"HISTORICAL: {info['event']}", info['hitt_notes'])
+
+    if usp_hit:
+        return ("⚠️", "MAJOR CYCLE — Uranus=Saturn/Pluto active", "Hitt's #1 signal. Inflection point. Historical hits: 1776, 1852, 1929, 1997.")
+    if brad >= 30:
+        return ("⚠️", f"EXTREME BRADLEY ({brad:+.0f})", "Historically large moves. Fade if already at extremes.")
+    if brad <= -20:
+        return ("⚠️", f"EXTREME BRADLEY ({brad:+.0f})", "Historically sharp declines.")
+    if stellium and gc:
+        return ("⚠️", "STELLIUM + GRAND CROSS", "Extreme volatility. No directional edge. Reduce size.")
+    if gc:
+        return ("🟡", "GRAND CROSS", "Chaotic. Tight stops. Lock in hedges.")
+    if yod and t_sq:
+        return ("🟡", "YOD + T-SQUARE", "Fateful stress. Apex planets are the focus. Wait for resolution.")
+    if conf <= -2:
+        return ("🟢", f"STRESS BOUNCE (conf. {conf:+d})", "Historically: stress extremes mean-revert upward for equities.")
+    if conf >= 3:
+        return ("🟢", "STRONG BULL CONFLUENCE", "Weingarten Rule of Three satisfied.")
+    if conf <= -1:
+        return ("🟡", "CAUTION — stress building", "Tighten stops. Wait for clearer signal.")
+    if brad >= 15 and soft > hard:
+        return ("🟢", "BULLISH — soft dominance", "Continuation / inertia bias per Hitt Lesson 5.")
+    if brad <= -15 and hard > soft:
+        return ("🔴", "BEARISH — hard dominance", "Trend-change pressure per Hitt Lesson 5.")
+    if soft > hard + 4:
+        return ("🟢", "MILDLY BULLISH", "Soft-aspect dominance → continuation (Hitt).")
+    if hard > soft + 4:
+        return ("🔴", "MILDLY BEARISH", "Hard-aspect dominance → trend-change candidate (Hitt).")
+    if t_sq:
+        return ("🟡", "T-SQUARE active", "Focused stress. Apex planet is the key.")
+    return ("⚪", "NEUTRAL", "No directional edge. Trade technicals.")
+
+
+# ── render ─────────────────────────────────────────────────────────────
+
+def render(date_str: str, exchange: str):
+    global _date_str
+    _date_str = date_str
 
     try:
-        dt = datetime.strptime(args.date, "%Y-%m-%d")
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
-        print(f"❌ Invalid date: {args.date}. Use YYYY-MM-DD.")
+        print("Bad date. Use YYYY-MM-DD.")
         return
 
     jd = jd_from_date(dt.year, dt.month, dt.day, 12.0)
-
-    # ── Compute all signals ──────────────────────────────
     pos = get_longitudes(jd)
     spd = get_speeds(jd)
-    moon = get_moon_phase(jd)
+    moon_phase = get_moon_phase(jd)
     aspects = find_all_aspects(pos)
     cp = detect_all_complex_patterns(pos)
     bi = bradley_index(pos)
@@ -70,112 +100,151 @@ def main():
 
     hard = sum(1 for a in aspects if a["type"] in ("conjunction", "square", "opposition"))
     soft = sum(1 for a in aspects if a["type"] in ("sextile", "trine"))
-    elong = moon["elongation"]
-
     conf = compute_confluence_score(pos, spd, cp, bi["total"], len(hits))
+    elong = moon_phase["elongation"]
 
-    # ═══════════════════════════════════════════════════════
-    print()
-    print(f"  ASTRO SIGNALS — {args.date}")
-    print(f"  {'='*60}")
-    print()
+    stellium = cp.get("stellium") is not None
+    gc = cp.get("grand_cross") is not None
+    t_sq = cp.get("t_square") is not None
+    yod = cp.get("yod") is not None
+    gtrine = cp.get("grand_trine") is not None
 
-    # 1. Positions
-    print("  ┌─ PLANETARY POSITIONS ──────────────────────────────┐")
-    print(f"  │ {'Planet':<10} {'Long':>7}  {'Sign':<12} {'Deg':>5}  Rx │")
-    print(f"  │ {'-'*10} {'-'*7}  {'-'*12} {'-'*5}  {'-'*2} │")
-    for name in PLANETS:
-        lon = pos.get(name)
-        if lon is None:
-            continue
-        sign, _, deg = get_sign(lon)
-        rx = "🔄" if spd.get(name, 0) < 0 else " "
-        print(f"  │ {name:<10} {lon:>7.2f}°  {sign:<12} {deg:>5.2f}°  {rx} │")
-    node_lon = pos.get("Node", 0)
-    ns, _, nd = get_sign(node_lon)
-    print(f"  │ {'Node':<10} {node_lon:>7.2f}°  {ns:<12} {nd:>5.2f}°  — │")
-    print("  └────────────────────────────────────────────────────┘")
-    print()
+    moon_sign, _, _ = get_sign(pos["Moon"])
+    moon_bias = MOON_SIGN_ASSET_BIAS.get(moon_sign, {"bias": "-", "note": ""})
 
-    # 2. Moon
-    print(f"  🌙 MOON:  {_phase_label(elong)}")
-    print(f"     Elongation {elong:.1f}°  |  Illumination {moon['illumination']:.1%}  |  Age {moon['age']:.1f} days")
-    print()
+    # phase
+    if elong <= 15 or elong >= 345:
+        phase = "🌑 NEW"
+    elif 165 <= elong <= 195:
+        phase = "🌕 FULL"
+    elif 90 <= elong <= 105:
+        phase = "🌓 1Q"
+    elif 255 <= elong <= 270:
+        phase = "🌗 3Q"
+    elif elong < 90:
+        phase = "🌒 WXC"
+    elif elong < 165:
+        phase = "🌔 WXG"
+    elif elong < 255:
+        phase = "🌖 WNG"
+    else:
+        phase = "🌘 WNC"
 
-    # 3. Aspects
-    print(f"  📐 ASPECTS:  {hard} hard  |  {soft} soft  |  {bi['aspect_count']} total")
-    top = sorted(aspects, key=lambda a: a["orb"])[:6]
-    for a in top:
-        print(f"     {a['p1']:<10} {a['type']:<12} {a['p2']:<10}  orb {a['orb']:.2f}°")
-    print()
+    rx_list = [p for p in PLANETS if spd.get(p, 0) < 0]
 
-    # 4. Complex patterns
-    has_any = False
-    labels = {
-        "stellium": ("🔴 STELLIUM", "bodies_count"),
-        "grand_cross": ("🔴 GRAND CROSS", None),
-        "t_square": ("🟠 T-SQUARE", "apex"),
-        "yod": ("🟡 YOD", "apex"),
-        "grand_trine": ("🟢 GRAND TRINE", None),
-    }
-    for key, (label, detail_field) in labels.items():
+    # Featured planets — those on angles at open or with tightest orbs
+    featured = []
+    top3 = sorted(aspects, key=lambda a: a["orb"])[:3]
+    for a in top3:
+        for p in (a["p1"], a["p2"]):
+            if p not in featured:
+                featured.append(p)
+    featured = featured[:4]
+
+    direction, label, note = verdict(
+        conf["score"], bi["total"], hard, soft, stellium, gc,
+        usp is not None, t_sq, yod,
+    )
+
+    # ── header ─────────────────────────────────────────────────────
+    print()
+    print(f"╔{HR}╗")
+    print(f"║  {'ASTROECON SIGNAL — ' + date_str:<{W-2}}║")
+    if mood := PLANET_MARKET_SIGNATURE.get(featured[0], "") if featured else "":
+        print(f"║  Day character: {mood:<{W-18}}║")
+    print(f"╠{HR}╣")
+    print(f"║  {direction} {label:<{W-7}}║")
+    print(f"║  {note:<{W-2}}║")
+    print(f"╠{HR}╣")
+
+    # ── status bar ─────────────────────────────────────────────────
+    rx_str = ",".join(rx_list) if rx_list else "none"
+    usp_str = "🔴 U=Sat/Plu" if usp else "no U=Sat/Plu"
+    print(f"║  {phase}  ·  Moon {moon_sign} ({moon_bias['bias']})  ·  Rx: {rx_str:<14} ║")
+    print(f"║  Confl {conf['score']:+d}  ·  Bradley {bi['total']:+.0f}  ·  Hard {hard}/Soft {soft}  ·  Midpts {len(hits):<2}  ·  {usp_str}  ║")
+    print(f"╠{HR}╣")
+
+    # ── complex patterns ───────────────────────────────────────────
+    any_pat = False
+    for key, lbl in [("stellium","🔴 STELLIUM"),("grand_cross","🔴 GRAND CROSS"),
+                     ("t_square","🟠 T-SQUARE"),("yod","🟡 YOD"),
+                     ("grand_trine","🟢 GRAND TRINE")]:
         pat = cp.get(key)
         if pat:
-            has_any = True
-            extra = ""
-            if detail_field and detail_field in pat:
-                extra = f" (apex: {pat[detail_field]})"
-            elif key == "stellium":
-                extra = f" ({pat['bodies_count']} bodies in {pat['sign']}, range {pat['degree_range']}°)"
-            print(f"  {label}{extra}")
-    if not has_any:
-        print("  — no complex patterns —")
-    print()
+            any_pat = True
+            source = COMPLEX_PATTERN_RULES.get(key, "")
+            # Truncate source to fit
+            print(f"║  {lbl}: {source[:W-14]:<{W-14}}║")
+    if not any_pat:
+        print(f"║  No complex aspect patterns.                                            ║")
+    print(f"╠{HR}╣")
 
-    # 5. Midpoints
-    print(f"  📍 MIDPOINTS:  {len(hits)} key hit(s)")
-    if usp:
-        print(f"     🔴 Uranus = Saturn/Pluto  (orb {usp['orb']:.3f}°) ← Hitt's #1")
-    for h in hits[:5]:
-        print(f"     {h['target']} = {h['pair'][0]}/{h['pair'][1]}  (orb {h['orb']:.3f}°)")
-    print()
+    # ── top aspects with Hitt keywords ─────────────────────────────
+    print(f"║  ACTIVE ASPECTS (closest orbs, Hitt Lesson 9):                         ║")
+    for a in top3:
+        meaning = planet_pair_meaning(a["p1"], a["p2"], a["type"])
+        line = f"║    {a['p1']:<8} {a['type']:<11} {a['p2']:<8} orb {a['orb']:.2f}°"
+        if meaning:
+            line += f"  → {meaning}"
+        print(f"{line:<{W-1}}║")
 
-    # 6. Bradley
-    print(f"  📊 BRADLEY:  total {bi['total']}  (hard {bi['hard_sum']}  soft {bi['soft_sum']})")
-    print()
+    # ── featured planets ───────────────────────────────────────────
+    print(f"╠{HR}╣")
+    print(f"║  FEATURED PLANETS:                                                     ║")
+    for p in featured:
+        desc = PLANET_MEANINGS.get(p, "")
+        print(f"║    {p:<8}  {desc:<{W-13}}║")
+    print(f"╠{HR}╣")
 
-    # 7. Confluence
-    print(f"  ⚖️  CONFLUENCE SCORE:  {conf['score']:+d}")
-    print(f"     Bull: {conf['bull_count']}  Bear: {conf['bear_count']}  →  {conf['interpretation']}")
-    print(f"     Flags: {', '.join(conf['flags'])}")
-    print()
+    # ── midpoint hits ──────────────────────────────────────────────
+    if hits:
+        print(f"║  MIDPOINT HITS (Ebertin):                                              ║")
+        for h in hits[:3]:
+            kw = h.get("ebertin_keywords", "")[:W-22]
+            print(f"║    {h['target']}= {h['pair'][0]}/{h['pair'][1]}  orb {h['orb']:.2f}°  → {kw:<{W-22}}║")
+    else:
+        print(f"║  No key midpoint hits.                                                 ║")
 
-    # 8. Stellium volatility
+    # ── stellium vol ────────────────────────────────────────────────
     if st_vol:
-        print(f"  📈 STELLIUM VOLATILITY:  {st_vol['volatility_multiplier']}×")
-        print(f"     Position size: {st_vol['suggested_position_fraction']:.0%}")
-        print(f"     Stop width:    {st_vol['suggested_stop_multiplier']:.1f}×")
-        print(f"     {st_vol['hitt_rule']}")
-    else:
-        print("  📈 STELLIUM VOLATILITY:  none (1.0× baseline)")
-    print()
+        print(f"╠{HR}╣")
+        print(f"║  STELLIUM VOLATILITY: {st_vol['volatility_multiplier']}×  →  pos. size {st_vol['suggested_position_fraction']:.0%},  stop {st_vol['suggested_stop_multiplier']:.1f}×      ║")
 
-    # 9. Retrogrades
-    rx_list = [p for p in PLANETS if spd.get(p, 0) < 0]
-    if rx_list:
-        print(f"  🔄 RETROGRADE:  {', '.join(rx_list)}")
-    else:
-        print("  🔄 RETROGRADE:  none")
-    print()
-
-    # 10. Intraday (lite)
+    # ── intraday ────────────────────────────────────────────────────
     from astroquant.intraday import trading_crossings
-    crossings, dc = trading_crossings(jd, args.exchange, step_minutes=10)
+    crossings, dc = trading_crossings(jd, exchange, step_minutes=15)
+    has_dc = dc.get("planets_on_angles") and len(dc["planets_on_angles"]) > 0
+    if has_dc:
+        print(f"╠{HR}╣")
+        print(f"║  AT OPEN ({exchange}):                                                  ║")
+        for pa in sorted(dc["planets_on_angles"], key=lambda x: x["orb"]):
+            sig = ANGLE_CROSSING_SIGNIFICANCE.get(pa["planet"], "")[:W-26]
+            print(f"║    {pa['planet']} on {pa['angle']}  orb {pa['orb']:.1f}°  → {sig:<{W-26}}║")
+        if dc.get("dominant_planet"):
+            dp = dc["dominant_planet"]
+            dp_sig = PLANET_MARKET_SIGNATURE.get(dp, "")
+            print(f"║    Dominant: {dp} — {dp_sig:<{W-17}}║")
+
     if crossings:
-        print(f"  ⏱️  INTRADAY ({args.exchange}):")
-        for c in crossings[:12]:
-            print(f"     {c['time_local']}  {c['planet']:<8} {c['angle']}  → {c['significance']}")
+        print(f"╠{HR}╣")
+        print(f"║  INTRADAY CROSSINGS (trading hours):                                   ║")
+        for c in crossings[:10]:
+            sig_short = ANGLE_CROSSING_SIGNIFICANCE.get(c["planet"], "")[:W-22]
+            print(f"║    {c['time_local']}  {c['planet']:<8} {c['angle']}  → {sig_short:<{W-22}}║")
+
+    print(f"╚{HR}╝")
     print()
+
+
+# ── main ──────────────────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser(description="Deep-research single-day astro signal card")
+    p.add_argument("date", help="YYYY-MM-DD")
+    p.add_argument("--exchange", "-e", default="CHICAGO",
+                   choices=["CHICAGO", "NYC", "LONDON", "TOKYO"])
+    args = p.parse_args()
+    render(args.date, args.exchange)
 
 
 if __name__ == "__main__":
