@@ -198,14 +198,29 @@ def signals_to_csv(
 ) -> str:
     """Compute full signal + returns DataFrame and save to CSV.
 
-    Returns the CSV as a string (first 2000 chars) and saves to output_path.
+    If output_path is given, saves there.  Otherwise saves to:
+      ./signals_{ticker}_{start}_{end}.csv
+    Always prints the DataFrame as a readable table to stdout.
     """
     df = compute_signals_with_returns(start, end, ticker, optimized_weights)
 
-    if output_path:
-        df.to_csv(output_path, index=False, float_format="%.6f")
-        return f"Saved {len(df)} rows × {len(df.columns)} cols → {output_path}\n\nColumns: {list(df.columns)}"
+    path = output_path or f"signals_{ticker}_{start}_{end}.csv"
+    df.to_csv(path, index=False, float_format="%.6f")
 
-    # If no path, return preview
-    preview = df.to_csv(index=False, float_format="%.4f")
-    return f"{len(df)} rows × {len(df.columns)} cols\n\n{preview[:3000]}..."
+    # Print clean table to terminal
+    import sys
+    pd.set_option('display.max_rows', 60)
+    pd.set_option('display.max_columns', 20)
+    pd.set_option('display.width', 300)
+    pd.set_option('display.max_colwidth', 25)
+
+    print(f"\n{'='*120}")
+    print(f"  ASTRO SIGNALS + MARKET RETURNS:  {ticker}  |  {start} → {end}  |  {len(df)} days")
+    print(f"{'='*120}")
+    print(df.to_string(index=False))
+    print(f"\n{'='*120}")
+    print(f"  Saved: {path}")
+    print(f"  Columns: {list(df.columns)}")
+    print(f"{'='*120}\n")
+
+    return f"Saved {len(df)} rows × {len(df.columns)} cols → {path}"
