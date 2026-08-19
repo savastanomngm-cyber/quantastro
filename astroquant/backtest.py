@@ -415,3 +415,222 @@ def fetch_and_analyze(
 
     result["summary"] = "\n".join(lines)
     return result
+
+
+def optimize_and_backtest(
+    start: str,
+    end: str,
+    ticker: str = "SPY",
+    train_ratio: float = 0.5,
+    lambd: float = 0.01,
+    use_confluence: bool = True,
+) -> Dict[str, Any]:
+    """Split data into train/test, optimize weights on train, evaluate on test.
+
+    Args:
+        start, end: full date range
+        ticker: yfinance symbol
+        train_ratio: fraction of days for training (first N%)
+        lambd: ridge regularization strength
+        use_confluence: also test confluence scoring
+
+    Returns:
+        dict with optimization results + test-set performance + summary
+    """
+    import pandas as pd
+    from .optimize import (
+        optimize_bradley_weights,
+        compute_optimized_bradley,
+        compute_confluence_score,
+        stellium_volatility_signal,
+    )
+    from .midpoints import all_key_midpoint_hits
+    from .aspects import detect_all_complex_patterns
+    from .bradley import BRADLEY_WEIGHTS
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        return {"error": "yfinance not installed"}
+
+    # ── Fetch prices ──
+    data = yf.download(ticker, start=start, end=end, progress=False)
+    if data.empty:
+        return {"error": f"no data for {ticker}"}
+
+    close = data["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    log_ret = np.log(close / close.shift(1)).dropna()
+
+    # ── Build signal DataFrame (original signals) ──
+    signal_rows = generate_signal_df(start, end)
+    signal_df = pd.DataFrame(signal_rows)
+    signal_df["date"] = pd.to_datetime(signal_df["date"])
+
+    price_df = pd.DataFrame({"log_return": log_ret})
+    price_df.index = pd.to_datetime(price_df.index)
+
+    merged = signal_df.merge(price_df, left_on="date", right_index=True, how="inner")
+    merged = merged.dropna(subset=["log_return"])
+
+    n_total = len(merged)
+    n_train = int(n_total * train_ratio)
+
+    train = merged.iloc[:n_train]
+    test = merged.iloc[n_train:]
+
+    if len(train) < 100 or len(test) < 30:
+        return {"error": f"insufficient data: train={len(train)}, test={len(test)}"}
+
+    # ── Build JD list + returns for optimization ──
+    jd_train = []
+    for ts in train["date"]:
+        jd_train.append(jd_from_date(ts.year, ts.month, ts.day, 12.0))
+    returns_train = train["log_return"].values
+
+    # ── Optimize weights ──
+    opt = optimize_bradley_weights(jd_train, returns_train, lambd=lambd)
+    opt["train_days"] = n_train
+    opt["test_days"] = n_total - n_train
+
+    # ── Apply optimized weights to test set ──
+    test_bradley_opt = []
+    test_confluence = []
+    test_stellium_vol = []
+    for _, row in test.iterrows():
+        ts = row["date"]
+        jd = jd_from_date(ts.year, ts.month, ts.day, 12.0)
+        pos = get_longitudes(jd)
+        opt_val = compute_optimized_bradley(pos, opt["weights"])
+        test_bradley_opt.append(opt_val)
+
+        if use_confluence:
+            from .ephemeris import get_speeds
+            spd = get_speeds(jd)
+            cp = detect_all_complex_patterns(pos)
+            hits = all_key_midpoint_hits(pos, orb=1.0)
+            conf = compute_confluence_score(pos, spd, cp, opt_val, len(hits))
+            test_confluence.append(conf["score"])
+            st_vol = stellium_volatility_signal(pos)
+            test_stellium_vol.append(st_vol["volatility_multiplier"] if st_vol else 1.0)
+
+    test = test.copy()
+    test["bradley_optimized"] = test_bradley_opt
+    if test_confluence:
+        test["confluence_score"] = test_confluence
+    if test_stellium_vol:
+        test["stellium_vol_mult"] = test_stellium_vol
+
+    # ── Analyze test set ──
+    # Optimized Bradley z-score
+    zs_opt = z_score_analysis(test["bradley_optimized"], test["log_return"])
+
+    # Confluence score analysis
+    if test_confluence:
+        # Map confluence -> mean return
+        conf_groups = test.groupby("confluence_score")["log_return"].agg(["mean", "std", "count"])
+        conf_analysis = {
+            "mean_by_score": {int(k): round(float(v["mean"]), 6) for k, v in conf_groups.iterrows()},
+            "count_by_score": {int(k): int(v["count"]) for k, v in conf_groups.iterrows()},
+        }
+        # Long-only: only trade when confluence >= 2
+        conf_bull = test[test["confluence_score"] >= 2]
+        if len(conf_bull) > 5:
+            conf_analysis["bull_signal_mean"] = round(float(conf_bull["log_return"].mean()), 6)
+            conf_analysis["bull_signal_std"] = round(float(conf_bull["log_return"].std()), 6)
+            conf_analysis["bull_signal_days"] = len(conf_bull)
+            conf_analysis["bull_signal_annualized"] = round(
+                float(conf_bull["log_return"].mean() * 252), 4
+            )
+        conf_bear = test[test["confluence_score"] <= -2]
+        if len(conf_bear) > 5:
+            conf_analysis["bear_signal_mean"] = round(float(conf_bear["log_return"].mean()), 6)
+            conf_analysis["bear_signal_days"] = len(conf_bear)
+        zs_conf = z_score_analysis(test["confluence_score"], test["log_return"])
+    else:
+        conf_analysis = {}
+        zs_conf = {}
+
+    # Stellium volatility check
+    if test_stellium_vol:
+        st_mask = test["stellium_vol_mult"] > 1.0
+        st_returns = test.loc[st_mask, "log_return"]
+        non_st = test.loc[~st_mask, "log_return"]
+        stellium_stats = {
+            "stellium_days": int(st_mask.sum()),
+            "stellium_mean_return": round(float(st_returns.mean()), 6) if len(st_returns) else 0,
+            "stellium_volatility": round(float(st_returns.std()), 6) if len(st_returns) > 1 else 0,
+            "non_stellium_volatility": round(float(non_st.std()), 6) if len(non_st) > 1 else 0,
+            "vol_ratio": round(float(st_returns.std() / non_st.std()), 3) if len(st_returns) > 1 and len(non_st) > 1 else 0,
+        }
+    else:
+        stellium_stats = {}
+
+    # ── Text summary ──
+    lines = [f"## Optimized AstroQuant: {ticker} ({start} → {end})", ""]
+    lines.append(f"**Train days:** {n_train} | **Test days:** {n_total - n_train}")
+    lines.append(f"**Ridge λ:** {lambd}")
+    lines.append(f"**In-sample R²:** {opt['r2']}")
+    lines.append("")
+
+    lines.append("### Top 10 Optimized Aspect Weights")
+    lines.append("| Feature | Weight |")
+    lines.append("|---------|--------|")
+    for name, wt in opt["feature_importance"][:10]:
+        lines.append(f"| {name} | {wt:+.6f} |")
+    lines.append("")
+
+    lines.append("### Aggregated Aspect Weights")
+    lines.append("| Aspect | Avg Optimized | Bradley 1947 |")
+    lines.append("|--------|---------------|-------------|")
+    for asp in ["conjunction", "sextile", "square", "trine", "opposition"]:
+        opt_avg = opt["aggregated"].get(asp, 0)
+        b47 = BRADLEY_WEIGHTS.get(asp, 0)
+        lines.append(f"| {asp} | {opt_avg:+.4f} | {b47:+.1f} |")
+    lines.append("")
+
+    lines.append("### Optimized Bradley Decile Analysis (Test Set)")
+    lines.append(f"**Monotonicity:** {zs_opt.get('monotonicity_score', 0):+.4f} ({zs_opt.get('interpretation', '')})")
+    lines.append("| Decile | Mean Return | Std | Days |")
+    lines.append("|--------|-------------|-----|------|")
+    for b in zs_opt.get("bins", [])[:10]:
+        lines.append(f"| {b['bin']} | {b['mean_return']:+.5f} | {b['std']:.5f} | {b['count']} |")
+    lines.append("")
+
+    if conf_analysis and "mean_by_score" in conf_analysis:
+        lines.append("### Confluence Score Analysis (Weingarten Rule of Three)")
+        lines.append("| Score | Mean Return | Days |")
+        lines.append("|-------|-------------|------|")
+        for score in sorted(conf_analysis["mean_by_score"]):
+            mean_r = conf_analysis["mean_by_score"][score]
+            days = conf_analysis["count_by_score"].get(score, 0)
+            lines.append(f"| {score:+d} | {mean_r:+.5f} | {days} |")
+        lines.append("")
+        if "bull_signal_mean" in conf_analysis:
+            lines.append(f"- **Bull signal (score ≥ +2):** {conf_analysis['bull_signal_mean']:+.5f} mean, "
+                         f"{conf_analysis['bull_signal_annualized']:+.2%} annualized, "
+                         f"{conf_analysis['bull_signal_days']} days")
+        if "bear_signal_mean" in conf_analysis:
+            lines.append(f"- **Bear signal (score ≤ -2):** {conf_analysis['bear_signal_mean']:+.5f} mean, "
+                         f"{conf_analysis['bear_signal_days']} days")
+        if "monotonicity_score" in zs_conf:
+            lines.append(f"- **Monotonicity:** {zs_conf['monotonicity_score']:+.4f}")
+        lines.append("")
+
+    if stellium_stats:
+        lines.append("### Stellium Volatility Signal")
+        lines.append(f"- **Stellium days:** {stellium_stats['stellium_days']}")
+        lines.append(f"- **Stellium volatility:** {stellium_stats.get('stellium_volatility', 0):.6f}")
+        lines.append(f"- **Non-Stellium volatility:** {stellium_stats.get('non_stellium_volatility', 0):.6f}")
+        lines.append(f"- **Volatility ratio:** {stellium_stats.get('vol_ratio', 0):.2f}x")
+        lines.append("")
+
+    return {
+        "ticker": ticker,
+        "optimization": opt,
+        "test_bradley_zs": zs_opt,
+        "confluence_analysis": conf_analysis,
+        "stellium_stats": stellium_stats,
+        "summary": "\n".join(lines),
+    }
