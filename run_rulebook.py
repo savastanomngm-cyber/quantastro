@@ -28,12 +28,23 @@ def main():
     if args.prev_high is None and args.ticker:
         import yfinance as yf
         dt = datetime.strptime(args.date, "%Y-%m-%d")
-        # Get the most recent trading day BEFORE the typed date (the anchor
-        # candle). yfinance end is EXCLUSIVE, so iloc[-1] = previous session.
-        data = yf.download(args.ticker, start=(dt - __import__('datetime').timedelta(days=8)).strftime("%Y-%m-%d"),
-                           end=args.date, progress=False)
+        # Fetch a window that INCLUDES the typed date (end exclusive → +1 day)
+        # so we can detect whether it has already closed.
+        start = (dt - __import__('datetime').timedelta(days=8)).strftime("%Y-%m-%d")
+        end = (dt + __import__('datetime').timedelta(days=1)).strftime("%Y-%m-%d")
+        data = yf.download(args.ticker, start=start, end=end, progress=False)
         if len(data) >= 1:
-            prev = data.iloc[-1]
+            last = data.iloc[-1]
+            last_date = data.index[-1].strftime("%Y-%m-%d")
+            if last_date == args.date and len(data) >= 2:
+                # The typed date HAS closed: it's the current close,
+                # the row before it is the anchor (yesterday).
+                args.close = float(last[("Close", args.ticker)])
+                prev = data.iloc[-2]
+            else:
+                # Date hasn't closed (planning ahead): last row IS the anchor;
+                # no current close → signal will be NEUTRAL until price is typed.
+                prev = last
             args.prev_open = float(prev[("Open", args.ticker)])
             args.prev_high = float(prev[("High", args.ticker)])
             args.prev_low = float(prev[("Low", args.ticker)])

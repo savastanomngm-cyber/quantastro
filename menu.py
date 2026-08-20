@@ -71,27 +71,42 @@ def ticker_for(asset: str) -> str:
 
 
 def fetch_prev_day(asset: str, date_str: str):
-    """Auto-fetch the previous trading day's OHLC for the given date.
+    """Auto-fetch OHLC info for the given date.
 
-    yfinance `end` is EXCLUSIVE, so data covers days < date_str:
-      - iloc[-1] = the most recent trading day BEFORE date_str = the ANCHOR
-        (yesterday's candle).
+    Returns dict with:
+      - previous trading day's OHLC (the ANCHOR candle)
+      - current_close: the typed date's close IF it has already closed,
+        else None (date hasn't traded yet → planning mode).
+    yfinance end is EXCLUSIVE, so we fetch through date+1 to include the
+    typed date when it exists.
     """
     import yfinance as yf
     dt = datetime.strptime(date_str, "%Y-%m-%d")
     start = (dt - timedelta(days=8)).strftime("%Y-%m-%d")
-    # fetch through date_str; iloc[-1] is the last trading day strictly before it
-    data = yf.download(ticker_for(asset), start=start, end=date_str, progress=False)
+    end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+    data = yf.download(ticker_for(asset), start=start, end=end, progress=False)
     if len(data) < 1:
         return None
-    prev = data.iloc[-1]
     tk = ticker_for(asset)
+    last = data.iloc[-1]
+    last_date = data.index[-1].strftime("%Y-%m-%d")
+
+    current_close = None
+    if last_date == date_str and len(data) >= 2:
+        current_close = float(last[("Close", tk)])
+        prev = data.iloc[-2]
+        anchor_date = data.index[-2].strftime("%Y-%m-%d")
+    else:
+        prev = last
+        anchor_date = last_date
+
     return {
         "open": float(prev[("Open", tk)]),
         "high": float(prev[("High", tk)]),
         "low": float(prev[("Low", tk)]),
         "close": float(prev[("Close", tk)]),
-        "close_date": data.index[-1].strftime("%Y-%m-%d"),
+        "close_date": anchor_date,
+        "current_close": current_close,
     }
 
 
@@ -124,10 +139,14 @@ def opt_signal_card():
             "--open", str(prev["open"]),
             "--high", str(prev["high"]),
             "--low", str(prev["low"]),
-            "--price", str(prev["close"]),
+            "--price", str(prev["current_close"] if prev["current_close"] is not None else prev["close"]),
         ]
         print()
         subprocess.run(cmd2)
+        if prev["current_close"] is None:
+            print(f"{C['yellow']}  ⚠ NOTE: {date_str} has no closed candle yet (planning ahead).\n"
+                  f"  The envelope uses yesterday's close as a stand-in.\n"
+                  f"  Re-run after the session closes for the real signal.{C['reset']}")
     else:
         print(f"{C['dim']}  (couldn't fetch yesterday's data — run run_signals.py manually with --open/--high/--low/--price){C['reset']}")
 
@@ -185,7 +204,27 @@ def run_fib_calc():
 
     R = prev["high"] - prev["low"]
     print(f"\n  RANGE = {R:.2f}\n")
-    print(f"  {C['bold']}GRID (0=LOW {prev['low']:.2f} → 1=HIGH {prev['high']:.2f}){C['reset']}")
+
+    # ── For GC: fetch live GC=F / GLD ratio to show futures prices ──
+    gc_ratio = None
+    if asset == "GC":
+        try:
+            import yfinance as yf
+            gc = yf.download("GC=F", period="2d", progress=False)
+            gld = yf.download("GLD", period="2d", progress=False)
+            if len(gc) and len(gld):
+                gc_price = float(gc["Close"].iloc[-1])
+                gld_price = float(gld["Close"].iloc[-1])
+                gc_ratio = gc_price / gld_price
+                print(f"  {C['yellow']}GC=F {gc_price:.0f} / GLD {gld_price:.2f} → ratio {gc_ratio:.2f}{C['reset']}")
+                print(f"  {C['dim']}Levels below shown in BOTH: GLD (proxy) and GC (=GLD × ratio){C['reset']}\n")
+        except Exception:
+            gc_ratio = None
+
+    rng_label = f"GRID (0=LOW {prev['low']:.2f} → 1=HIGH {prev['high']:.2f})"
+    if gc_ratio:
+        rng_label += f"   [GC: 0={prev['low']*gc_ratio:.0f} → 1={prev['high']*gc_ratio:.0f}]"
+    print(f"  {C['bold']}{rng_label}{C['reset']}")
     levels = [
         ("+1.372", prev["high"] + R * 0.372, "TAKE PROFIT"),
         ("+1.272", prev["high"] + R * 0.272, "approach"),
@@ -205,8 +244,12 @@ def run_fib_calc():
         ("-1.372", prev["low"] - R * 0.372, "DEEP BUY"),
     ]
     for name, price, note in levels:
-        fmt = f"  {name:>7}  {price:>10.2f}  {C['green'] if 'BUY' in note or 'TAKE' in note else C['dim']}{note}{C['reset']}"
-        print(fmt)
+        glyph = C['green'] if 'BUY' in note or 'TAKE' in note else C['dim']
+        if gc_ratio:
+            gc_p = price * gc_ratio
+            print(f"  {name:>7}  GLD {price:>9.2f}   GC {gc_p:>9.0f}  {glyph}{note}{C['reset']}")
+        else:
+            print(f"  {name:>7}  {price:>10.2f}  {glyph}{note}{C['reset']}")
     input(f"\n{C['dim']}Press ENTER to continue...{C['reset']}")
 
 
