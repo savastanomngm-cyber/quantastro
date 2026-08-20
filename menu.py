@@ -137,7 +137,14 @@ def opt_signal_card():
             except ValueError:
                 print("  Numbers only (e.g. 4330.7)")
         anchor_label = "from-your-chart"
-        candle = {"open": lo, "high": hi, "low": lo, "close": lo}
+        # Ask for today's current/live price too, so the envelope shows
+        # where price REALLY is (not just the anchor LOW).
+        cur = input("  Today's current price (ENTER = skip): ").strip()
+        try:
+            cur = float(cur)
+        except ValueError:
+            cur = None
+        candle = {"open": lo, "high": hi, "low": lo, "close": cur if cur is not None else lo}
     else:
         try:
             candle = fetch_prev_day(asset, date_str)
