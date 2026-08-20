@@ -120,35 +120,57 @@ def opt_signal_card():
     if not asset:
         return
 
-    # Try to auto-fetch yesterday's data for fib envelope
-    prev = None
-    try:
-        prev = fetch_prev_day(asset, date_str)
-    except Exception:
-        pass
+    # ── Get the anchor candle (yesterday's H/L) ──
+    # GC: always ask the user for THEIR chart's candle (broker globex
+    #     day-boundaries differ from yfinance — auto-fetch won't match).
+    # ES/NQ: auto-fetch the previous cash-session candle.
+    if asset == "GC":
+        print(f"\n  {C['yellow']}GOLD (GC=F): enter yesterday's candle from YOUR chart.{C['reset']}")
+        print(f"  {C['dim']}(so the fib envelope is in the futures prices you see){C['reset']}")
+        while True:
+            try:
+                lo = float(input("  Yesterday's LOW : ").strip())
+                hi = float(input("  Yesterday's HIGH: ").strip())
+                if hi > lo:
+                    break
+                print("  HIGH must be > LOW")
+            except ValueError:
+                print("  Numbers only (e.g. 4330.7)")
+        anchor_label = "from-your-chart"
+        candle = {"open": lo, "high": hi, "low": lo, "close": lo}
+    else:
+        try:
+            candle = fetch_prev_day(asset, date_str)
+            anchor_label = candle["close_date"] if candle else "?"
+        except Exception:
+            candle = None
+            anchor_label = "?"
+        if candle is None:
+            print(f"{C['red']}  Could not fetch data. Run the signal card manually with --open/--high/--low/--price.{C['reset']}")
+            input(f"\n{C['dim']}Press ENTER...{C['reset']}")
+            return
+        print(f"\n  Anchored on {anchor_label}:  H={candle['high']:.2f}  L={candle['low']:.2f}")
 
-    cmd = [sys.executable, "-m", "astroquant.run", date_str]
-    print(f"\n{'─'*W}")
+    current_price = None
+    if asset != "GC" and candle and candle.get("current_close") is not None:
+        current_price = candle["current_close"]
+
+    # ONE clean signal card via run_signals.py (fib envelope + astro)
+    print(f"\n{HR}\n  📐 SIGNAL CARD  (anchored on {anchor_label})\n{HR}")
+    price_arg = str(current_price) if current_price is not None else str(candle["close"])
+    cmd = [
+        sys.executable, "run_signals.py", date_str,
+        "--open", str(candle["open"]),
+        "--high", str(candle["high"]),
+        "--low", str(candle["low"]),
+        "--price", price_arg,
+    ]
+    print()
     subprocess.run(cmd)
 
-    # Fib envelope with real data if available
-    if prev:
-        print(f"\n{HR}\n  📐 GOLDEN FIB ENVELOPE (anchored on {prev['close_date']})\n{HR}")
-        cmd2 = [
-            sys.executable, "run_signals.py", date_str,
-            "--open", str(prev["open"]),
-            "--high", str(prev["high"]),
-            "--low", str(prev["low"]),
-            "--price", str(prev["current_close"] if prev["current_close"] is not None else prev["close"]),
-        ]
-        print()
-        subprocess.run(cmd2)
-        if prev["current_close"] is None:
-            print(f"{C['yellow']}  ⚠ NOTE: {date_str} has no closed candle yet (planning ahead).\n"
-                  f"  The envelope uses yesterday's close as a stand-in.\n"
-                  f"  Re-run after the session closes for the real signal.{C['reset']}")
-    else:
-        print(f"{C['dim']}  (couldn't fetch yesterday's data — run run_signals.py manually with --open/--high/--low/--price){C['reset']}")
+    if asset == "GC":
+        print(f"\n  {C['cyan']}For the full golden-fib LEVEL grid, use menu option 3\n"
+              f"  (enter the same LOW/HIGH).{C['reset']}")
 
     input(f"\n{C['dim']}Press ENTER to continue...{C['reset']}")
 

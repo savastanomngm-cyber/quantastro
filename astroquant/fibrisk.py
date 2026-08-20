@@ -94,10 +94,11 @@ class FibEnvelope:
         lvls["+0.236"] = base_low + R * 0.236
 
         # ── anchor ──
-        # Anchor is the swing origin: for a long setup it's the low;
-        # for a short setup it's the high.  Default to midpoint.
-        midpoint = (base_low + base_high) / 2.0
-        lvls["0.000"] = midpoint
+        # For consistency with how the fib tool is drawn on a chart,
+        # 0.000 sits at the range LOW (0) and 1.000 at the range HIGH (1).
+        # (The earlier midpoint convention only affected the interior
+        #  retracement labels, never the validated +1.272/-1.272 entries.)
+        lvls["0.000"] = base_low
 
         # ── downward retracements (from high toward low) ──
         lvls["-0.236"] = base_high - R * 0.236
