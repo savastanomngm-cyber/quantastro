@@ -28,18 +28,16 @@ def main():
     if args.prev_high is None and args.ticker:
         import yfinance as yf
         dt = datetime.strptime(args.date, "%Y-%m-%d")
-        # Get yesterday
-        data = yf.download(args.ticker, start=(dt - __import__('datetime').timedelta(days=5)).strftime("%Y-%m-%d"),
+        # Get the most recent trading day BEFORE the typed date (the anchor
+        # candle). yfinance end is EXCLUSIVE, so iloc[-1] = previous session.
+        data = yf.download(args.ticker, start=(dt - __import__('datetime').timedelta(days=8)).strftime("%Y-%m-%d"),
                            end=args.date, progress=False)
-        if len(data) >= 2:
-            prev = data.iloc[-2]
+        if len(data) >= 1:
+            prev = data.iloc[-1]
             args.prev_open = float(prev[("Open", args.ticker)])
             args.prev_high = float(prev[("High", args.ticker)])
             args.prev_low = float(prev[("Low", args.ticker)])
             args.prev_close = float(prev[("Close", args.ticker)])
-        if len(data) >= 1 and args.close is None:
-            today = data.iloc[-1]
-            args.close = float(today[("Close", args.ticker)])
 
     if args.prev_high is None:
         print("Error: need --prev-high or an OLDER ticker date with data from the prior session")

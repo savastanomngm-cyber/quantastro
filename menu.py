@@ -71,21 +71,27 @@ def ticker_for(asset: str) -> str:
 
 
 def fetch_prev_day(asset: str, date_str: str):
-    """Auto-fetch the PREVIOUS trading day's OHLC for the given date."""
+    """Auto-fetch the previous trading day's OHLC for the given date.
+
+    yfinance `end` is EXCLUSIVE, so data covers days < date_str:
+      - iloc[-1] = the most recent trading day BEFORE date_str = the ANCHOR
+        (yesterday's candle).
+    """
     import yfinance as yf
     dt = datetime.strptime(date_str, "%Y-%m-%d")
     start = (dt - timedelta(days=8)).strftime("%Y-%m-%d")
+    # fetch through date_str; iloc[-1] is the last trading day strictly before it
     data = yf.download(ticker_for(asset), start=start, end=date_str, progress=False)
-    if len(data) < 2:
+    if len(data) < 1:
         return None
-    prev = data.iloc[-2]
+    prev = data.iloc[-1]
     tk = ticker_for(asset)
     return {
         "open": float(prev[("Open", tk)]),
         "high": float(prev[("High", tk)]),
         "low": float(prev[("Low", tk)]),
         "close": float(prev[("Close", tk)]),
-        "close_date": data.index[-2].strftime("%Y-%m-%d"),
+        "close_date": data.index[-1].strftime("%Y-%m-%d"),
     }
 
 
