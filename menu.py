@@ -163,6 +163,9 @@ def run_rulebook():
     if not asset:
         return
 
+    if asset == "GC":
+        print(f"\n  {C['yellow']}Note: this gives the ASTRO signal (date-based, reliable).\n"
+              f"  For GC fib LEVELS use option 3, entering your chart's candle.{C['reset']}\n")
     cmd = [sys.executable, "run_rulebook.py", date_str, "--ticker", ticker_for(asset), "--asset", asset]
     subprocess.run(cmd)
     input(f"\n{C['dim']}Press ENTER to continue...{C['reset']}")
@@ -181,75 +184,46 @@ def run_fib_calc():
 
     # Auto-fetch yesterday
     prev = None
-    try:
-        prev = fetch_prev_day(asset, date_str)
-    except Exception:
-        pass
-
-    if prev:
-        print(f"\n  Using yesterday ({prev['close_date']}):")
-        print(f"    Open={prev['open']:.2f}  High={prev['high']:.2f}  Low={prev['low']:.2f}  Close={prev['close']:.2f}")
-    else:
-        print("\n  Enter yesterday's candle manually:")
+    # For GC, NEVER auto-fetch — futures daily candles from yfinance use a
+    # different globex session boundary than most brokers, so levels would
+    # not match your chart.  Use the candle you SEE on your own chart.
+    if asset == "GC":
+        print(f"\n  {C['yellow']}GOLD (GC=F): enter the candle from YOUR chart.{C['reset']}")
+        print(f"  {C['dim']}(yfinance futures bars don't match broker globex day-boundaries,\n"
+              f"   so we use the exact LOW/HIGH you see to guarantee the grid is right){C['reset']}")
         while True:
             try:
-                hi = float(input("  HIGH: ").strip())
-                lo = float(input("  LOW : ").strip())
+                lo = float(input("  Yesterday's LOW : ").strip())
+                hi = float(input("  Yesterday's HIGH: ").strip())
                 if hi > lo:
                     break
                 print("  HIGH must be > LOW")
             except ValueError:
-                print("  Numbers only")
-        prev = {"high": hi, "low": lo, "close_date": "manual"}
+                print("  Numbers only (e.g. 4330.7)")
+        prev = {"high": hi, "low": lo, "close_date": "from-your-chart"}
+    else:
+        try:
+            prev = fetch_prev_day(asset, date_str)
+        except Exception:
+            prev = None
+        if prev:
+            print(f"\n  Using yesterday ({prev['close_date']}):")
+            print(f"    Open={prev['open']:.2f}  High={prev['high']:.2f}  Low={prev['low']:.2f}  Close={prev['close']:.2f}")
+        else:
+            print("\n  Enter yesterday's candle manually:")
+            while True:
+                try:
+                    hi = float(input("  HIGH: ").strip())
+                    lo = float(input("  LOW : ").strip())
+                    if hi > lo:
+                        break
+                    print("  HIGH must be > LOW")
+                except ValueError:
+                    print("  Numbers only")
+            prev = {"high": hi, "low": lo, "close_date": "manual"}
 
     R = prev["high"] - prev["low"]
     print(f"\n  RANGE = {R:.2f}\n")
-
-    # ── For GC: anchor on the REAL GC=F candle for the anchor date ──
-    # (no GLD proxy/ratio — futures prices directly).
-    use_real_gc = False
-    if asset == "GC":
-        try:
-            import yfinance as yf
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            start = (dt - timedelta(days=8)).strftime("%Y-%m-%d")
-            end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
-            gc_data = yf.download("GC=F", start=start, end=end, progress=False)
-            if len(gc_data) >= 1:
-                last_gc = gc_data.index[-1].strftime("%Y-%m-%d")
-                anchor_idx = -1
-                if last_gc == date_str and len(gc_data) >= 2:
-                    anchor_idx = -2  # date already closed → anchor = previous
-                elif last_gc != date_str:
-                    anchor_idx = -1  # planning → anchor = last available
-                if anchor_idx != -1 or last_gc != date_str:
-                    # anchor on the real GC candle that matches prev['close_date']
-                    # find the row whose date == prev['close_date']
-                    found = None
-                    for j in range(len(gc_data)):
-                        if gc_data.index[j].strftime("%Y-%m-%d") == prev["close_date"]:
-                            found = j
-                            break
-                    if found is not None:
-                        gc_hi = float(gc_data.iloc[found][("High", "GC=F")])
-                        gc_lo = float(gc_data.iloc[found][("Low", "GC=F")])
-                        if gc_hi > gc_lo:
-                            prev = {"high": gc_hi, "low": gc_lo,
-                                    "close_date": prev["close_date"], "is_gc": True}
-                            use_real_gc = True
-                            R = gc_hi - gc_lo  # recompute with real GC range
-                            print(f"  {C['yellow']}GC=F direct({prev['close_date']}): 0={gc_lo:.1f} 1={gc_hi:.1f}  range={R:.1f}{C['reset']}\n")
-                if not use_real_gc:
-                    # fallback: live ratio
-                    gld = yf.download("GLD", period="2d", progress=False)
-                    if len(gc_data) and len(gld):
-                        gc_price = float(gc_data["Close"].iloc[-1])
-                        gld_price = float(gld["Close"].iloc[-1])
-                        gc_ratio = gc_price / gld_price
-                        print(f"  {C['yellow']}GC=F {gc_price:.0f} / GLD {gld_price:.2f} → ratio {gc_ratio:.2f}{C['reset']}")
-                        print(f"  {C['dim']}Levels in GLD (proxy) + GC (× ratio){C['reset']}\n")
-        except Exception:
-            pass
 
     levels = [
         ("+1.372", prev["high"] + R * 0.372, "TAKE PROFIT"),
