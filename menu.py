@@ -205,26 +205,52 @@ def run_fib_calc():
     R = prev["high"] - prev["low"]
     print(f"\n  RANGE = {R:.2f}\n")
 
-    # ── For GC: fetch live GC=F / GLD ratio to show futures prices ──
-    gc_ratio = None
+    # ── For GC: anchor on the REAL GC=F candle for the anchor date ──
+    # (no GLD proxy/ratio — futures prices directly).
+    use_real_gc = False
     if asset == "GC":
         try:
             import yfinance as yf
-            gc = yf.download("GC=F", period="2d", progress=False)
-            gld = yf.download("GLD", period="2d", progress=False)
-            if len(gc) and len(gld):
-                gc_price = float(gc["Close"].iloc[-1])
-                gld_price = float(gld["Close"].iloc[-1])
-                gc_ratio = gc_price / gld_price
-                print(f"  {C['yellow']}GC=F {gc_price:.0f} / GLD {gld_price:.2f} → ratio {gc_ratio:.2f}{C['reset']}")
-                print(f"  {C['dim']}Levels below shown in BOTH: GLD (proxy) and GC (=GLD × ratio){C['reset']}\n")
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            start = (dt - timedelta(days=8)).strftime("%Y-%m-%d")
+            end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+            gc_data = yf.download("GC=F", start=start, end=end, progress=False)
+            if len(gc_data) >= 1:
+                last_gc = gc_data.index[-1].strftime("%Y-%m-%d")
+                anchor_idx = -1
+                if last_gc == date_str and len(gc_data) >= 2:
+                    anchor_idx = -2  # date already closed → anchor = previous
+                elif last_gc != date_str:
+                    anchor_idx = -1  # planning → anchor = last available
+                if anchor_idx != -1 or last_gc != date_str:
+                    # anchor on the real GC candle that matches prev['close_date']
+                    # find the row whose date == prev['close_date']
+                    found = None
+                    for j in range(len(gc_data)):
+                        if gc_data.index[j].strftime("%Y-%m-%d") == prev["close_date"]:
+                            found = j
+                            break
+                    if found is not None:
+                        gc_hi = float(gc_data.iloc[found][("High", "GC=F")])
+                        gc_lo = float(gc_data.iloc[found][("Low", "GC=F")])
+                        if gc_hi > gc_lo:
+                            prev = {"high": gc_hi, "low": gc_lo,
+                                    "close_date": prev["close_date"], "is_gc": True}
+                            use_real_gc = True
+                            R = gc_hi - gc_lo  # recompute with real GC range
+                            print(f"  {C['yellow']}GC=F direct({prev['close_date']}): 0={gc_lo:.1f} 1={gc_hi:.1f}  range={R:.1f}{C['reset']}\n")
+                if not use_real_gc:
+                    # fallback: live ratio
+                    gld = yf.download("GLD", period="2d", progress=False)
+                    if len(gc_data) and len(gld):
+                        gc_price = float(gc_data["Close"].iloc[-1])
+                        gld_price = float(gld["Close"].iloc[-1])
+                        gc_ratio = gc_price / gld_price
+                        print(f"  {C['yellow']}GC=F {gc_price:.0f} / GLD {gld_price:.2f} → ratio {gc_ratio:.2f}{C['reset']}")
+                        print(f"  {C['dim']}Levels in GLD (proxy) + GC (× ratio){C['reset']}\n")
         except Exception:
-            gc_ratio = None
+            pass
 
-    rng_label = f"GRID (0=LOW {prev['low']:.2f} → 1=HIGH {prev['high']:.2f})"
-    if gc_ratio:
-        rng_label += f"   [GC: 0={prev['low']*gc_ratio:.0f} → 1={prev['high']*gc_ratio:.0f}]"
-    print(f"  {C['bold']}{rng_label}{C['reset']}")
     levels = [
         ("+1.372", prev["high"] + R * 0.372, "TAKE PROFIT"),
         ("+1.272", prev["high"] + R * 0.272, "approach"),
@@ -245,11 +271,7 @@ def run_fib_calc():
     ]
     for name, price, note in levels:
         glyph = C['green'] if 'BUY' in note or 'TAKE' in note else C['dim']
-        if gc_ratio:
-            gc_p = price * gc_ratio
-            print(f"  {name:>7}  GLD {price:>9.2f}   GC {gc_p:>9.0f}  {glyph}{note}{C['reset']}")
-        else:
-            print(f"  {name:>7}  {price:>10.2f}  {glyph}{note}{C['reset']}")
+        print(f"  {name:>7}  {price:>10.2f}  {glyph}{note}{C['reset']}")
     input(f"\n{C['dim']}Press ENTER to continue...{C['reset']}")
 
 
